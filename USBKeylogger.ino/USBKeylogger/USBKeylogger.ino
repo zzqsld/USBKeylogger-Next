@@ -23,7 +23,6 @@
 #include <ESP8266HTTPClient.h>
 #include <Updater.h>
 #include <ArduinoOTA.h>
-#include <SoftwareSerial.h>
 #include <bearssl/bearssl.h>
 #include <time.h>
 #include "html.h"
@@ -156,17 +155,7 @@ struct Ch9350Parser {
   unsigned long droppedChecksumFrames;
 };
 
-// Second CH9350L input on SoftwareSerial (configurable pins via build flags)
-#ifndef SECOND_UART_RX
-  #define SECOND_UART_RX D5
-#endif
-#ifndef SECOND_UART_TX
-  #define SECOND_UART_TX D6
-#endif
-SoftwareSerial ch9350Serial;
-
 Ch9350Parser parserMain;
-Ch9350Parser parserSecond;
 
 // OTA state
 bool otaInProgress = false;
@@ -185,7 +174,6 @@ void processHIDFrame();
 bool hidReportLooksValid(const uint8_t* report);
 String templateProcessor(const String& var);
 void runOpenWifiProbe();
-void processSecondSerialBytes();
 void startArduinoOTA();
 
 static inline bool isLogAscii(uint8_t b) {
@@ -451,7 +439,8 @@ void setup() {
   Serial.setRxBufferSize(512);
   Serial.begin(115200);
   Serial.setDebugOutput(false);
-  ch9350Serial.begin(115200, SWSERIAL_8N1, SECOND_UART_RX, SECOND_UART_TX);
+  // Enable 8-second watchdog; loop() must not block longer than this.
+  ESP.wdtEnable(WDTO_8S);
   if (!LittleFS.begin()) {
     delay(200);
     if (!LittleFS.begin()) {
@@ -589,7 +578,6 @@ void loop() {
 
   // CH9350 protocol parsing - always runs, regardless of Wi-Fi state
   processSerialBytes();
-  processSecondSerialBytes();
 
   // Handle ArduinoOTA (IDE / network firmware update)
   ArduinoOTA.handle();
@@ -691,6 +679,9 @@ void loop() {
       }
     }
   }
+
+  // Keep the hardware watchdog happy; the SDK also feeds it during yield()/delay().
+  ESP.wdtFeed();
 }
 
 void acceptPendingHidFrame(uint8_t* hid, Ch9350Parser& p) {
@@ -789,10 +780,6 @@ void processCh9350Stream(Stream& stream, Ch9350Parser& p) {
 
 void processSerialBytes() {
   processCh9350Stream(Serial, parserMain);
-}
-
-void processSecondSerialBytes() {
-  processCh9350Stream(ch9350Serial, parserSecond);
 }
 
 void processHIDFrame() {
