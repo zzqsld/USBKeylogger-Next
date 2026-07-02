@@ -1,0 +1,7 @@
+.claude/
+__pycache__/
+*.pyc
+build-arduino/
+USBKeylogger.ino/verify_probe.py
+.pio/
+.vscode/
